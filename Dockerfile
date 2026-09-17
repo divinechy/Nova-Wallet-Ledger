@@ -6,7 +6,7 @@ RUN dotnet restore src/NovaWalletLedger.Api/NovaWalletLedger.Api.csproj
 
 COPY src/NovaWalletLedger.Api/ src/NovaWalletLedger.Api/
 WORKDIR /src/src/NovaWalletLedger.Api
-RUN dotnet publish -c Release -o /app --no-restore
+RUN dotnet publish -c Release -o /app
 
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 WORKDIR /app
