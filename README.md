@@ -1,9 +1,7 @@
 # NovaWallet Ledger Service
 
 A simplified wallet ledger for FirstBank NovaPay's NovaWallet module, built for the
-"NovaWallet Ledger Service" take-home task. Treats money the way the brief asks: integer
-kobo everywhere, concurrency-safe transfers, idempotent replay, a hard daily outbound
-limit, and an append-only audit trail.
+"NovaWallet Ledger Service" take-home task.
 
 ## Contents
 
@@ -14,9 +12,6 @@ limit, and an append-only audit trail.
 - [Daily limit](#daily-limit)
 - [Auth](#auth)
 - [API walkthrough](#api-walkthrough)
-- [Testing](#testing)
-- [Trade-offs & assumptions](#trade-offs--assumptions)
-- [What's deliberately out of scope](#whats-deliberately-out-of-scope)
 
 ## Quick start
 
@@ -31,60 +26,6 @@ healthy, then creates the schema. Once it logs `Database schema ready.`:
 
 - Swagger UI: http://localhost:8080/swagger
 - API base URL: http://localhost:8080
-
-To exercise it end to end:
-
-```bash
-# 1. Mint a dev bearer token (stands in for a real identity provider — see Auth below)
-TOKEN=$(curl -s -X POST http://localhost:8080/auth/dev-token \
-  -H "Content-Type: application/json" \
-  -d '{"customerId":"cust-001"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['accessToken'])")
-
-# 2. Create two wallets
-WALLET_A=$(curl -s -X POST http://localhost:8080/wallets \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"customerId":"cust-001"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
-
-WALLET_B=$(curl -s -X POST http://localhost:8080/wallets \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"customerId":"cust-002"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
-
-# 3. Credit wallet A (simulate an inbound NIP transfer of ₦1,000)
-curl -s -X POST http://localhost:8080/wallets/$WALLET_A/credit \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"amountKobo": 100000, "reference": "seed"}'
-
-# 4. Transfer ₦250 from A to B (Idempotency-Key is required)
-curl -s -X POST http://localhost:8080/wallets/$WALLET_A/transfers \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -H "Idempotency-Key: demo-key-1" \
-  -d "{\"toWalletId\": \"$WALLET_B\", \"amountKobo\": 25000, \"reference\": \"rent\"}"
-
-# 5. Statement for A
-curl -s http://localhost:8080/wallets/$WALLET_A/statement -H "Authorization: Bearer $TOKEN"
-```
-
-### Working on it in VS Code
-
-```bash
-git clone <your-fork-url>
-cd NovaWalletLedger
-code .
-```
-
-You only need `dotnet compose up` to actually *run* the service. If you want to run the
-API directly from VS Code against the containerised Postgres (for debugging with
-breakpoints):
-
-```bash
-docker compose up db -d          # just the database
-cd src/NovaWalletLedger.Api
-dotnet user-secrets set "ConnectionStrings:Default" "Host=localhost;Port=5433;Database=novawallet;Username=novawallet;Password=novawallet_dev_pw"
-dotnet run
-```
-
-(Port 5433 because `docker-compose.yml` maps the container's 5432 to host 5433 to avoid
-clashing with a local Postgres install.)
 
 ## Architecture
 
@@ -196,59 +137,3 @@ Full interactive docs at `/swagger` once running. Summary:
 | POST   | `/wallets/{id}/transfers`            | requires `Idempotency-Key` header |
 | GET    | `/wallets/{id}/statement`            | paginated, newest first (`?page=&pageSize=`) |
 | GET    | `/health/live`, `/health/ready`      | anonymous, for container orchestration |
-
-Errors are RFC 7807 Problem Details (`application/problem+json`) with `status`, `title`,
-`detail`, and a `traceId` extension for correlating with logs.
-
-## Testing
-
-```bash
-docker compose up db -d   # tests need a running Docker daemon (Testcontainers spins up its own Postgres)
-cd tests/NovaWalletLedger.Tests
-dotnet test
-```
-
-Tests boot the real API in-process (`WebApplicationFactory<Program>`) against a real,
-throwaway Postgres container per test run (via Testcontainers) — deliberately **not**
-EF Core's InMemory provider, because InMemory doesn't honour transactions or row locks and
-would let every concurrency bug this suite exists to catch pass silently.
-
-Covered: concurrent transfers past available balance, concurrent credits, idempotent
-replay, idempotency-key payload mismatch, missing idempotency key, daily limit
-enforcement.
-
-## Trade-offs & assumptions
-
-- **`Database.EnsureCreated()` instead of EF migrations.** For a task with a 48–72 hour
-  window, hand-authoring migration snapshot files without a local `dotnet` toolchain to
-  generate and verify them against felt riskier than documenting the trade-off. In a real
-  codebase this would be `dotnet ef migrations add InitialCreate` committed to source
-  control, applied via `dbContext.Database.Migrate()` on startup instead.
-- **Pessimistic locking (`FOR UPDATE`) over optimistic concurrency / retry loops.** Simpler
-  to reason about correctness for a small number of hot rows (wallets), at the cost of
-  transactions queuing rather than racing-and-retrying under very high contention on a
-  single wallet. For NovaWallet's actual traffic shape (many wallets, low contention per
-  wallet) this is the right trade-off; a system with a few extremely hot wallets (e.g. a
-  merchant settlement account) might prefer optimistic concurrency with backoff instead.
-- **WAT modelled as a fixed UTC+1 offset**, not an IANA timezone id, so the "midnight WAT"
-  reset doesn't depend on the OS's tzdata being installed/current inside the container.
-  Correct for Nigeria (no DST); would need revisiting for a market that observes DST.
-- **Idempotency-Key required only on transfers**, not credit — the brief specifies it for
-  the transfer endpoint; credit is modelled as one-directional and less prone to accidental
-  client-side retries mattering as much, though a production system would likely want it
-  there too.
-- **Rate limiting is a per-user/IP fixed window**, not sliding window or token bucket —
-  simplest option that still demonstrates the middleware; tuned generously (200 req/10s)
-  so it doesn't interfere with legitimate concurrent load or the test suite.
-
-## What's deliberately out of scope
-
-Per the brief's own note that this is "intentionally more than can be gold-plated" —
-prioritized correctness and the concurrency/idempotency hard constraints over these:
-
-- **Outbox pattern / `TransferCompleted` event publishing** — not implemented. Would be
-  the next thing added for a real event-driven NovaPay, so other modules (NovaSave
-  round-ups, NovaBiz settlement) can react to transfers without polling.
-- **KYC tiering / BVN-NIN checks** — out of scope per the brief; the service assumes
-  wallets are already provisioned for a KYC'd customer.
-- **Refresh tokens / token revocation** — the dev issuer mints short-lived (1h) tokens only.
